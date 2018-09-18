@@ -17,6 +17,7 @@ import random
 import time
 import pdb
 import copy
+from transforms import get_affine_transform, affine_transform, fliplr_joints
 
 try:
     from .cfgs.config import cfg
@@ -63,8 +64,7 @@ class Data(RNGDataFlow):
 
         self.num_joints = 17
         self.flip_pairs = [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16]]
-        self.parent_ids = None
-       
+      
 
         
         if train_or_test == "train" or cfg.use_gt_bbox:
@@ -227,6 +227,63 @@ class Data(RNGDataFlow):
             })
 
         return rec
+
+    def generate_target(self, joints, joints_vis):
+        '''
+        :param joints:  [num_joints, 3]
+        :param joints_vis: [num_joints, 3]
+        :return: target, target_weight(1: visible, 0: invisible)
+        '''
+        target_weight = np.ones((self.num_joints, 1), dtype=np.float32)
+        target_weight[:, 0] = joints_vis[:, 0]
+
+        assert cfg.target_type == 'gaussian', \
+            'Only support gaussian map now!'
+
+        if cfg.target_type == 'gaussian':
+            target = np.zeros((self.num_joints,
+                               cfg.heatmap_size[1],
+                               cfg.heatmap_size[0]),
+                              dtype=np.float32)
+
+            tmp_size = cfg.sigma * 3
+
+            for joint_id in range(self.num_joints):
+                # feat_stride = [cfg.image_width, cfg.image_height] / cfg.heatmap_size
+                feat_stride = [cfg.image_width / cfg.heatmap_size[0] , cfg.image_height / cfg.heatmap_size[1]]
+                
+                mu_x = int(joints[joint_id][0] / feat_stride[0] + 0.5)
+                mu_y = int(joints[joint_id][1] / feat_stride[1] + 0.5)
+                # Check that any part of the gaussian is in-bounds
+                ul = [int(mu_x - tmp_size), int(mu_y - tmp_size)]
+                br = [int(mu_x + tmp_size + 1), int(mu_y + tmp_size + 1)]
+                if ul[0] >= cfg.heatmap_size[0] or ul[1] >= cfg.heatmap_size[1] \
+                        or br[0] < 0 or br[1] < 0:
+                    # If not, just return the image as is
+                    target_weight[joint_id] = 0
+                    continue
+
+                # # Generate gaussian
+                size = 2 * tmp_size + 1
+                x = np.arange(0, size, 1, np.float32)
+                y = x[:, np.newaxis]
+                x0 = y0 = size // 2
+                # The gaussian is not normalized, we want the center value to equal 1
+                g = np.exp(- ((x - x0) ** 2 + (y - y0) ** 2) / (2 * cfg.sigma ** 2))
+
+                # Usable gaussian range
+                g_x = max(0, -ul[0]), min(br[0], cfg.heatmap_size[0]) - ul[0]
+                g_y = max(0, -ul[1]), min(br[1], cfg.heatmap_size[1]) - ul[1]
+                # Image range
+                img_x = max(0, ul[0]), min(br[0], cfg.heatmap_size[0])
+                img_y = max(0, ul[1]), min(br[1], cfg.heatmap_size[1])
+
+                v = target_weight[joint_id]
+                if v > 0.5:
+                    target[joint_id][img_y[0]:img_y[1], img_x[0]:img_x[1]] = \
+                        g[g_y[0]:g_y[1], g_x[0]:g_x[1]]
+
+        return target, target_weight
 
     def augmentation_scale(self, img, mask, label):
         dice = np.random.rand()
@@ -392,17 +449,16 @@ class Data(RNGDataFlow):
             self.rng.shuffle(self.db)
 
         for img_id in range(len(self.db)):
-            
+            img_id = np.random.randint(0,len(self.db))
             db_rec = copy.deepcopy(self.db[img_id])
             image_file = db_rec['image']
             filename = db_rec['filename'] if 'filename' in db_rec else ''
             imgnum = db_rec['imgnum'] if 'imgnum' in db_rec else ''
             
             data_numpy = cv2.imread(image_file, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+            # data_numpu = cv2.cvtColor(data_numpy, cv2.COLOR_BGR2RGB)
             if data_numpy is None:
                 continue
-
-
 
             joints = db_rec['joints_3d']
             joints_vis = db_rec['joints_3d_vis']
@@ -412,24 +468,32 @@ class Data(RNGDataFlow):
             score = db_rec['score'] if 'score' in db_rec else 1
             r = 0
 
-            if train_or_test == "train":
+            if self.image_set == "train":
                 sf = cfg.scale_factor
                 rf = cfg.rot_factor
                 s = s * np.clip(np.random.randn()*sf + 1, 1 - sf, 1 + sf)
                 r = np.clip(np.random.randn()*rf, -rf*2, rf*2) \
                     if random.random() <= 0.6 else 0
 
-                if self.flip and random.random() <= 0.5:
+                if cfg.flip and random.random() <= 0.5:
                     data_numpy = data_numpy[:, ::-1, :]
                     joints, joints_vis = fliplr_joints(
-                        joints, joints_vis, data_numpy.shape[1], self.flip_pairs)
+                        joints, joints_vis, data_numpy.shape[1], [])
                     c[0] = data_numpy.shape[1] - c[0] - 1
 
-            trans = get_affine_transform(c, s, r, self.image_size)
-            input = cv2.warpAffine(data_numpy, trans, (int(self.image_size[0]), int(self.image_size[1])), flags=cv2.INTER_LINEAR)
+            trans = get_affine_transform(c, s, r, [cfg.image_width, cfg.image_height])
+            input = cv2.warpAffine(data_numpy, trans, (int(cfg.image_width), int(cfg.image_height)), flags=cv2.INTER_LINEAR)
+            input1=copy.deepcopy(input)
+               
 
-            if self.transform:
-                input = self.transform(input)
+            if cfg.use_normalize == True:
+                input = input / 255
+                mean = [0.485, 0.456, 0.406]    # rgb
+                std = [0.229, 0.224, 0.225]
+                if cfg.is_rgb == True:
+                    input = (input-mean) / std
+                else:
+                    input = (input-mean[::-1]) / std[::-1]
 
             for i in range(self.num_joints):
                 if joints_vis[i, 0] > 0.0:
@@ -437,155 +501,23 @@ class Data(RNGDataFlow):
 
             target, target_weight = self.generate_target(joints, joints_vis)
 
-            target = torch.from_numpy(target)
-            target_weight = torch.from_numpy(target_weight)
+            # target = torch.from_numpy(target)
+            # target_weight = torch.from_numpy(target_weight)
 
             meta = {
-                'image': image_file,
-                'filename': filename,
-                'imgnum': imgnum,
-                'joints': joints,
-                'joints_vis': joints_vis,
-                'center': c,
-                'scale': s,
-                'rotation': r,
-                'score': score
-            }
-
-            return input, target, target_weight, meta
-
-
-
-
-
-
-
-
-            # read img, mask, and label data
-            img_path = os.path.join(self.images_dir, '%012d.jpg' % img_id)
-            img = cv2.imread(img_path)
-
-            mask_path = os.path.join(self.masks_dir, "mask_miss_%012d.png" % img_id)
-            mask = cv2.imread(mask_path, 0)
-
-            label_path = os.path.join(self.labels_dir, "label_%012d" % img_id)
-            f = open(label_path, 'rb')
-            persons = pickle.load(f)
-
-            label = {
-                "persons": persons,
-                "scale_self": persons[0]["scale_provided"],
-                "objpos": persons[0]["objpos"]
-            }
-
-            if cfg.augmentation:
-                img, mask, label = self.augmentation_scale(img, mask, label)
-                img, mask, label = self.augmentation_rotate(img, mask, label)
-                img, mask, label = self.augmentation_crop(img, mask, label)
-                img, mask, label = self.augmentation_flip(img, mask, label)
-
-            img = img.astype(np.uint8)
-            raw_h, raw_w, _ = img.shape
-            img = cv2.resize(img, (cfg.img_y, cfg.img_x))
-            mask = cv2.resize(mask, (cfg.grid_y, cfg.grid_x)) / 255
-
-            # create blank heat map
-            heat_maps = np.zeros((cfg.grid_y, cfg.grid_x, cfg.ch_heats))
-
-            # create blank paf
-            paf = np.zeros((cfg.grid_y, cfg.grid_x, cfg.ch_vectors))
-
-            start = cfg.stride / 2.0 - 0.5
-
-            for i in range(cfg.ch_heats - 1): # for each keypoint
-                for person_label in label["persons"]:
-                    if person_label['joint'][i, 2] > 1: # cropped or unlabeled
-                        continue
-
-                    x_center = person_label['joint'][i, 0] * cfg.img_x / raw_w
-                    y_center = person_label['joint'][i, 1] * cfg.img_y / raw_h
-                    for g_y in range(cfg.grid_y):
-                        for g_x in range(cfg.grid_x):
-                            x = start + g_x * cfg.stride
-                            y = start + g_y * cfg.stride
-
-                            d2 = (x - x_center) * (x - x_center) + (y - y_center) * (y - y_center)
-                            exponent = d2 / 2.0 / cfg.sigma / cfg.sigma
-                            if exponent > 4.6052:
-                                # //ln(100) = -ln(1%)
-                                continue;
-                            val = min(np.exp(-exponent), 1)
-
-                            # maximum in original paper, but sum in keras implementation
-                            if val > heat_maps[g_y, g_x, i]:
-                                heat_maps[g_y, g_x, i] = val
-
-            # the background channel
-            for g_y in range(cfg.grid_y):
-                for g_x in range(cfg.grid_x):
-                    max_val = np.max(heat_maps[g_y, g_x, :])
-                    heat_maps[g_y, g_x, cfg.ch_heats - 1] = 1 - max_val
-
-            for i in range(int(cfg.ch_vectors / 2)):
-                limb_from_kp = cfg.limb_from[i]
-                limb_to_kp = cfg.limb_to[i]
-                count = np.zeros((cfg.grid_y, cfg.grid_x))
-
-                for person_label in label["persons"]:
-                    # get keypoint coord in the label map
-                    limb_from = Point(x=person_label['joint'][limb_from_kp, 0] * cfg.img_x / raw_w / 8,
-                                      y=person_label['joint'][limb_from_kp, 1] * cfg.img_y / raw_h / 8)
-                    limb_from_v = person_label['joint'][limb_from_kp, 2]
-
-                    limb_to = Point(x=person_label['joint'][limb_to_kp, 0] * cfg.img_x / raw_w / 8,
-                                    y=person_label['joint'][limb_to_kp, 1] * cfg.img_y / raw_h / 8)
-                    limb_to_v = person_label['joint'][limb_to_kp, 2]
-
-                    if limb_from_v > 1 or limb_to_v > 1:
-                        continue
-
-                    bc = Point(x=limb_to.x-limb_from.x,
-                               y=limb_to.y-limb_from.y)
-                    norm_bc = bc.norm()
-                    if norm_bc < 1e-8:
-                        continue
-
-                    bc = Point(x=bc.x/norm_bc,
-                               y=bc.y/norm_bc)
-
-                    min_x = int(max(round(min(limb_from.x, limb_to.x) - cfg.thre), 0))
-                    max_x = int(min(round(max(limb_from.x, limb_to.x) + cfg.thre), cfg.grid_x))
-
-                    min_y = int(max(round(min(limb_from.y, limb_to.y) - cfg.thre), 0))
-                    max_y = int(min(round(max(limb_from.y, limb_to.y) + cfg.thre), cfg.grid_y))
-                    
-                    for g_y in range(min_y, max_y):
-                        for g_x in range(min_x, max_x):
-                            ba = Point(x=g_x-limb_from.x,
-                                       y=g_y-limb_from.y)
-                            dist = np.abs(ba.x * bc.y - ba.y * bc.x)
-
-                            if dist > cfg.thre:
-                                continue
-                            paf[g_y, g_x, i * 2] += bc.x
-                            paf[g_y, g_x, i * 2 + 1] += bc.y
-                            count[g_y, g_x] += 1
-
-                for g_y in range(0, cfg.grid_y):
-                    for g_x in range(0, cfg.grid_x):
-                        if count[g_y, g_x] > 0:
-                            paf[g_y, g_x, i * 2] = paf[g_y, g_x, i * 2] / count[g_y, g_x]
-                            paf[g_y, g_x, i * 2 + 1] = paf[g_y, g_x, i * 2 + 1] / count[g_y, g_x]
-
-            mask = np.expand_dims(mask, axis=2)
-            heat_maps = heat_maps * mask
-            paf = paf * mask
-
-            yield [img, heat_maps, paf, mask]
-
-
-        
-
+            'image': image_file,
+            'filename': filename,
+            'imgnum': imgnum,
+            'joints': joints,
+            'joints_vis': joints_vis,
+            'center': c,
+            'scale': s,
+            'rotation': r,
+            'score': score}
+            # pdb.set_trace()
+            #target (17, 64, 64), target_weight (17, 1),
+            # yield input, target, target_weight, meta
+            yield input, target, target_weight
 
 if __name__ == '__main__':
     ds = Data('train', True)

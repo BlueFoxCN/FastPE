@@ -1,12 +1,14 @@
 import os
 import multiprocessing
 import tensorflow as tf
-
+from tensorflow.contrib.layers import variance_scaling_initializer
 from tensorpack import *
 from tensorpack.tfutils.summary import *
 from tensorpack.tfutils.symbolic_functions import *
 from tensorpack.utils.gpu import get_nr_gpu
 from tensorpack.tfutils import optimizer, gradproc
+
+import numpy  as np
 
 try:
     from .cfgs.config import cfg
@@ -15,56 +17,57 @@ except Exception:
     from cfgs.config import cfg
     from reader import Data
 
-if cfg.backbone == 'vgg19':
-    try:
-        from .modules import VGGBlock as Backbone, Stage1Block, StageTBlock
-    except Exception:
-        from modules import VGGBlock as Backbone, Stage1Block, StageTBlock
-else:
-    try:
-        # from .modules import Mobilenetv2Block as Backbone, Stage1DepthBlock as Stage1Block, StageTDepthBlock as StageTBlock
-        from .modules import Mobilenetv2Block as Backbone, Stage1Block, StageTBlock
-    except Exception:
-        # from modules import Mobilenetv2Block as Backbone, Stage1DepthBlock as Stage1Block, StageTDepthBlock as StageTBlock
-        from modules import Mobilenetv2Block as Backbone, Stage1Block, StageTBlock
+# if cfg.backbone == 'vgg19':
+#     try:
+#         from .modules import VGGBlock as Backbone, Stage1Block, StageTBlock
+#     except Exception:
+#         from modules import VGGBlock as Backbone, Stage1Block, StageTBlock
+# else:
+#     try:
+#         # from .modules import Mobilenetv2Block as Backbone, Stage1DepthBlock as Stage1Block, StageTDepthBlock as StageTBlock
+#         from .modules import Mobilenetv2Block as Backbone, Stage1Block, StageTBlock
+#     except Exception:
+#         # from modules import Mobilenetv2Block as Backbone, Stage1DepthBlock as Stage1Block, StageTDepthBlock as StageTBlock
+#         from modules import Mobilenetv2Block as Backbone, Stage1Block, StageTBlock
 
-def apply_mask(t, mask):
-    return t * mask
+# def apply_mask(t, mask):
+#     return t * mask
 
-def image_preprocess(image, bgr=True):
-    with tf.name_scope('image_preprocess'):
-        if image.dtype.base_dtype != tf.float32:
-            image = tf.cast(image, tf.float32)
-        image = image * (1.0 / 255)
+# def image_preprocess(image, bgr=True):
+#     with tf.name_scope('image_preprocess'):
+#         if image.dtype.base_dtype != tf.float32:
+#             image = tf.cast(image, tf.float32)
+#         image = image * (1.0 / 255)
 
-        mean = [0.485, 0.456, 0.406]    # rgb
-        std = [0.229, 0.224, 0.225]
-        if bgr:
-            mean = mean[::-1]
-            std = std[::-1]
-        image_mean = tf.constant(mean, dtype=tf.float32)
-        image_std = tf.constant(std, dtype=tf.float32)
-        image = (image - image_mean) / image_std
-        return image
+#         mean = [0.485, 0.456, 0.406]    # rgb
+#         std = [0.229, 0.224, 0.225]
+#         if bgr:
+#             mean = mean[::-1]
+#             std = std[::-1]
+#         image_mean = tf.constant(mean, dtype=tf.float32)
+#         image_std = tf.constant(std, dtype=tf.float32)
+#         image = (image - image_mean) / image_std
+#         return image
 
 class Model(ModelDesc):
 
-    def __init__(self, mode='train'):
-        self.is_train = mode == 'train'
-        self.apply_mask = self.is_train
+    def __init__(self):
+        pass
 
     def _get_inputs(self):
         return [
             InputDesc(tf.float32, (None, None, None, 3), 'imgs'),
-            InputDesc(tf.float32, (None, None, None, cfg.ch_heats), 'target'),
-            InputDesc(tf.float32, (None, None, None, cfg.ch_vectors), 'target_weight'),
-            InputDesc(tf.float32, (None, None, None, 1), 'meta')
+            InputDesc(tf.float32, (None, 17, 64, 64), 'target'),
+            InputDesc(tf.float32, (None, 17, 1), 'target_weight')
+            # InputDesc(tf.float32, (None, None, None, 1), 'meta')
         ]
 
     def _build_graph(self, inputs):
-        imgs, target, target_weight, meta = inputs
+        l, target, target_weight = inputs
+        
+        # imgs = image_preprocess(imgs, bgr=True)
 
-        l = tf.cast(imgs, tf.float32) / 255.0 - 1
+        # l = tf.cast(imgs, tf.float32) / 255.0 - 1
 
         #########################
         # ResNets
@@ -138,31 +141,33 @@ class Model(ModelDesc):
             with tf.variable_scope(layernanme):
                 for j in range(num_layers):
                     with tf.variable_scope('block{}'.format(j)):
-                    kernel, padding = get_deconv_cfg(num_kernels[j], j)
-                    planes = num_filters[i]
-                    l = Deconv2D('deconv', l, filters=planes, kernel_size=kernel, strides=2, padding=padding, \
-                    use_bias=cfg.deconv_with_bias, nl=BNReLU)
+
+                        kernel, padding = get_deconv_cfg(num_kernels[j], j)
+                        planes = num_filters[j]
+                        l = Deconv2D('deconv', l, filters=planes, kernel_size=kernel, strides=2, padding=padding, \
+                        use_bias=cfg.deconv_with_bias, nl=BNReLU)
 
                 return l
 
         with argscope(Conv2D, nl=tf.identity, use_bias=False,
                       W_init=variance_scaling_initializer(mode='FAN_OUT')), \
                 argscope([Conv2D, MaxPooling, GlobalAvgPooling, BatchNorm], data_format='NHWC'):
-            logits = (LinearWrap(l)
-                      .Conv2D('conv0', 64, 7, stride=2, nl=BNReLU)
-                      .MaxPooling('pool0', shape=3, stride=2, padding='SAME')
-                      .apply(layer, 'group0', block_func, 64, defs[0], 1, first=True)
-                      .apply(layer, 'group1', block_func, 128, defs[1], 2)
-                      .apply(layer, 'group2', block_func, 256, defs[2], 2)
-                      .apply(layer, 'group3', block_func, 512, defs[3], 2)
-                      .apply(make_deconv_layer, 'deconv_layers', cfg.num_deconv_layers, cfg.num_deconv_filters, cfg.num_deconv_kernels)
-                      .Conv2D('final_layer', cfg.final_num_joints, cfg.final_conv_kernel, padding='SAME' if cfg.final_conv_kernel == 3 else 'VALID')
+                logits = (LinearWrap(l)
+                          .Conv2D('conv0', 64, 7, stride=2, nl=BNReLU)
+                          .MaxPooling('pool0', shape=3, stride=2, padding='SAME')
+                          .apply(layer, 'group0', block_func, 64, defs[0], 1, first=True)
+                          .apply(layer, 'group1', block_func, 128, defs[1], 2)
+                          .apply(layer, 'group2', block_func, 256, defs[2], 2)
+                          .apply(layer, 'group3', block_func, 512, defs[3], 2)
+                          .apply(make_deconv_layer, 'deconv_layers', cfg.num_deconv_layers, cfg.num_deconv_filters, cfg.num_deconv_kernels)
+                          .Conv2D('final_layer', cfg.final_num_joints, cfg.final_conv_kernel, padding='SAME' if cfg.final_conv_kernel == 3 else 'VALID')())
+        
 
         batch_size = logits.get_shape()[0]##batch_size  
-        num_joints = logits.get_shape()[1]##channel
+        num_joints = logits.get_shape()[3]##channel
 
-        heatmaps_pred = tf.reshape(logits, (batch_size, num_joints, -1), name='heatmap_pred')
-        heatmapt_gt = tf.reshape(target, (batch_size, num_joints, -1), name='heatmap_gt')
+        heatmaps_pred = tf.reshape(logits, (batch_size, 16, -1), name='heatmap_pred')
+        heatmapt_gt = tf.reshape(target, (batch_size, 17, -1), name='heatmap_gt')
 
         # heatmaps_pred = tf.split(heatmaps_pred, num_joints, 1)
         # heatmapt_gt = tf.split(heatmapt_gt, num_joints, 1)
@@ -208,7 +213,7 @@ class Model(ModelDesc):
         output1 = tf.identity(logits,  name = 'heatmaps')
 
         add_moving_summary(self.cost, name='cost')
-        add_moving_summary(total_loss, name = 'loss'))
+        add_moving_summary(total_loss, name = 'loss')
         
 
         # gt_joint_heatmaps = tf.split(gt_heatmaps, [18, 1], axis=3)[0]
@@ -217,9 +222,6 @@ class Model(ModelDesc):
         # heatmap_shown = tf.reduce_max(joint_heatmaps, axis=3, keep_dims=True)
         # tf.summary.image(name='gt_heatmap', tensor=gt_heatmap_shown, max_outputs=3)
         # tf.summary.image(name='heatmap', tensor=heatmap_shown, max_outputs=3)
-        
-
-    
 
     def _get_optimizer(self):
         lr = get_scalar_var('learning_rate', cfg.base_lr, summary=True)
@@ -246,7 +248,7 @@ def get_data(train_or_test, batch_size):
                                       [-0.5836, -0.6948, 0.4203]],
                                      dtype='float32')[::-1, ::-1]
                                  )]),
-            imgaug.Clip(),
+            # imgaug.Clip(),
             imgaug.ToUint8()
         ]
 
@@ -263,7 +265,7 @@ def get_data(train_or_test, batch_size):
 
 def get_config(args, model):
     ds_train, sample_num = get_data('train', args.batch_size_per_gpu)
-    ds_val, _ = get_data('test', args.batch_size_per_gpu)
+    ds_val, _ = get_data('val', args.batch_size_per_gpu)
 
     return TrainConfig(
         dataflow = ds_train,
@@ -281,7 +283,7 @@ def get_config(args, model):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gpu', help='comma separated list of GPU(s) to use.', default='0,1')
+    parser.add_argument('--gpu', help='comma separated list of GPU(s) to use.', default='0')
     parser.add_argument('--load', help='load model')
     parser.add_argument('--batch_size_per_gpu', type=int, default=16)
     parser.add_argument('--logdir', help="directory of logging", default=None)
@@ -294,40 +296,16 @@ if __name__ == '__main__':
     if args.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
-
-    block_class, layers = cfg.resnet_spec[num_layers]
-
-
-
     model = Model()
-    if args.flops:
-        output_y = int(cfg.img_y / cfg.stride)
-        output_x = int(cfg.img_x / cfg.stride)
-
-        input_desc = [
-            InputDesc(tf.float32, (1, cfg.img_y, cfg.img_x, 3), 'imgs'),
-            InputDesc(tf.float32, (1, output_y, output_x, cfg.ch_heats), 'gt_heatmaps'),
-            InputDesc(tf.float32, (1, output_y, output_x, cfg.ch_vectors), 'gt_pafs'),
-            InputDesc(tf.float32, (1, output_y, output_x, 1), 'mask')
-        ]
-        input = PlaceholderInput()
-        input.setup(input_desc)
-        with TowerContext('', is_training=True):
-            model.build_graph(*input.get_input_tensors())
-
-        tf.profiler.profile(
-            tf.get_default_graph(),
-            cmd='op',
-            options=tf.profiler.ProfileOptionBuilder.float_operation())
-    else:
-        if args.logdir != None:
-            logger.set_logger_dir(os.path.join("train_log", args.logdir))
-        else:
-            logger.auto_set_dir()
-
-        config = get_config(args, model)
-        if args.load:
-            config.session_init = get_model_loader(args.load)
         
-        trainer = SyncMultiGPUTrainerParameterServer(get_nr_gpu())
-        launch_train_with_config(config, trainer)
+    if args.logdir != None:
+        logger.set_logger_dir(os.path.join("train_log", args.logdir))
+    else:
+        logger.auto_set_dir()
+
+    config = get_config(args, model)
+    if args.load:
+        config.session_init = get_model_loader(args.load)
+    
+    trainer = SyncMultiGPUTrainerParameterServer(get_nr_gpu())
+    launch_train_with_config(config, trainer)

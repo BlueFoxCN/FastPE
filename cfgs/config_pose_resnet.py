@@ -6,9 +6,9 @@ _ = cfg = edict()
 
 _.num_deconv_layers = 3
 
-_.num_deconv_filters = 256
+_.num_deconv_filters = [256, 256, 256]
 
-_.num_deconv_kernels = 4
+_.num_deconv_kernels = [4, 4, 4]
 
 _.deconv_with_bias = False
 
@@ -24,6 +24,8 @@ _.weight_decay = 5e-4
 
 _.base_lr = 2e-5
 
+_.depth = 50
+
 _.momentum = 0.9
 
 _.pixel_std = 200
@@ -31,6 +33,8 @@ _.pixel_std = 200
 _.image_width = 256
 
 _.image_height = 256
+
+_.heatmap_size = [64, 64] # width * height, ex: 24 * 32
 
 _.use_gt_bbox = True
 
@@ -41,6 +45,16 @@ _.data_format = 'jpg'
 _.scale_factor = 0.25
 
 _.rot_factor = 30
+
+_.flip = True
+
+_.sigma = 2
+
+_.use_normalize = False
+
+_.is_rgb = True
+
+_.target_type = 'gaussian'
 
 _.train_ann = 'coco/annotations/person_keypoints_train2017.json'
 _.val_ann = 'coco/annotations/person_keypoints_val2017.json'
@@ -111,7 +125,7 @@ _.val_labels_dir = 'coco/val2017_labels'
 
 # _.stride = 8
 
-# _.sigma = 7
+
 
 # _.grid_y = int(_.img_y / _.stride)
 # _.grid_x = int(_.img_x / _.stride)
