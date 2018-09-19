@@ -44,7 +44,7 @@ class Data(RNGDataFlow):
         # self.masks_dir = cfg.train_masks_dir if train_or_test == 'train' else cfg.val_masks_dir
         # self.images_dir = cfg.train_images_dir if train_or_test == 'train' else cfg.val_images_dir
 
-        self.aspect_ratio = cfg.image_width * 1.0 / cfg.image_height
+        self.aspect_ratio = cfg.image_size[0] * 1.0 / cfg.image_size[1]
 
         self.coco = COCO(self.anno_path)
 
@@ -63,7 +63,7 @@ class Data(RNGDataFlow):
         self.num_images = len(self.image_set_index)#len=118287
 
         self.num_joints = 17
-        self.flip_pairs = [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16]]
+        # self.flip_pairs = [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16]]
       
 
         
@@ -249,8 +249,8 @@ class Data(RNGDataFlow):
             tmp_size = cfg.sigma * 3
 
             for joint_id in range(self.num_joints):
-                # feat_stride = [cfg.image_width, cfg.image_height] / cfg.heatmap_size
-                feat_stride = [cfg.image_width / cfg.heatmap_size[0] , cfg.image_height / cfg.heatmap_size[1]]
+                # feat_stride = cfg.image_size / cfg.heatmap_size
+                feat_stride = [cfg.image_size[0] / cfg.heatmap_size[0] , cfg.image_size[1] / cfg.heatmap_size[1]]
                 
                 mu_x = int(joints[joint_id][0] / feat_stride[0] + 0.5)
                 mu_y = int(joints[joint_id][1] / feat_stride[1] + 0.5)
@@ -285,171 +285,12 @@ class Data(RNGDataFlow):
 
         return target, target_weight
 
-    def augmentation_scale(self, img, mask, label):
-        dice = np.random.rand()
-        if dice > self.params["scale_prob"]:
-            scale_multiplier = 1
-        else:
-            dice2 = np.random.rand()
-            scale_multiplier = (self.params["scale_max"] - self.params["scale_min"]) * dice2 + self.params["scale_min"]
-        scale_abs = self.params["target_dist"] / label["scale_self"]
-        scale = scale_abs * scale_multiplier
-
-        img_aug = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        mask_aug = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-
-        # modify meta data
-        label["objpos"][0] = scale * label["objpos"][0]
-        label["objpos"][1] = scale * label["objpos"][1]
-
-        for person in label["persons"]:
-            for joint_idx in range(cfg.ch_heats - 1):
-                person["joint"][joint_idx, 0] *= scale
-                person["joint"][joint_idx, 1] *= scale
-
-        return img_aug, mask_aug, label
-
-    def rotate_point(self, p, R, xy=True):
-        if xy == True:
-            aug_point = np.asarray(p + [1])
-        else:
-            aug_point = np.asarray([p[1], p[0], 1])
-        r_point = np.matmul(R, aug_point)
-        if xy == True:
-            return [r_point[0], r_point[1]]
-        else:
-            return [r_point[1], r_point[0]]
-
-    def augmentation_rotate(self, img, mask, label):
-
-        dice = np.random.rand()
-        degree = (dice - 0.5) * 2 * self.params["max_rotate_degree"]
-        height, width, _ = img.shape
-        center = (width / 2, height / 2)
-
-        # list of vertexes, in (x, y, 1) order
-        vertex_list = [
-            [0, 0],
-            [width-1, 0],
-            [0, height-1],
-            [width-1, height-1]
-        ]
-
-        R = cv2.getRotationMatrix2D(center, degree, 1)
-        rotate_vertex_list = []
-        for idx in range(4):
-            rotate_vertex_list.append(self.rotate_point(vertex_list[idx], R))
-
-        rotate_vertex_ary = np.asarray(rotate_vertex_list)
-        bbox_width = np.max(rotate_vertex_ary[:,0]) - np.min(rotate_vertex_ary[:,0])
-        bbox_height = np.max(rotate_vertex_ary[:,1]) - np.min(rotate_vertex_ary[:,1])
-
-        R[0, 2] += bbox_width / 2 - center[0]
-        R[1, 2] += bbox_height / 2 - center[1]
-
-        img_aug = cv2.warpAffine(img, R, (int(bbox_width), int(bbox_height)), _, cv2.INTER_CUBIC, cv2.BORDER_CONSTANT, (128, 128, 128))
-        mask_aug = cv2.warpAffine(mask, R, (int(bbox_width), int(bbox_height)), _, cv2.INTER_CUBIC, cv2.BORDER_CONSTANT, 255)
-
-        label['objpos'] = self.rotate_point(label['objpos'], R)
-
-        # modify meta data
-        label['objpos'] = self.rotate_point(label['objpos'], R, xy=False)
-
-        for person in label["persons"]:
-            for joint_idx in range(cfg.ch_heats - 1):
-                joint = [person['joint'][joint_idx, 0], person['joint'][joint_idx, 1]]
-                rotate_joint = self.rotate_point(joint, R)
-                person["joint"][joint_idx, 0] = rotate_joint[0]
-                person["joint"][joint_idx, 1] = rotate_joint[1]
-
-        return img_aug, mask_aug, label
-
-    def augmentation_crop(self, img, mask, label):
-        dice_x = np.random.rand()
-        dice_y = np.random.rand()
-
-        x_offset = (dice_x - 0.5) * 2 * self.params["center_perterb_max"]
-        y_offset = (dice_y - 0.5) * 2 * self.params["center_perterb_max"]
-
-        height, width, _ = img.shape
-
-        center_x = min(max(label["objpos"][0] + x_offset, 0), width - 1)
-        center_y = min(max(label["objpos"][1] + y_offset, 0), height - 1)
-
-        x_offset = center_x - label["objpos"][0]
-        y_offset = center_y - label["objpos"][1]
-
-        start_x = int(center_x - self.params["crop_size_x"] * 0.5)
-        start_y = int(center_y - self.params["crop_size_y"] * 0.5)
-        end_x = start_x + self.params["crop_size_x"]
-        end_y = start_y + self.params["crop_size_y"]
-
-        img_aug = np.ones((self.params["crop_size_y"], self.params["crop_size_x"], 3)) * 128
-        mask_aug = np.ones((self.params["crop_size_y"], self.params["crop_size_x"])) * 255
-
-        crop_start_x = max(start_x, 0)
-        crop_end_x = min(end_x, width)
-        crop_start_y = max(start_y, 0)
-        crop_end_y = min(end_y, height)
-        crop_width = crop_end_x - crop_start_x
-        crop_height = crop_end_y - crop_start_y
-
-        offset_x = 0 if start_x >= 0 else -start_x
-        offset_y = 0 if start_y >= 0 else -start_y
-
-        img_aug[offset_y:offset_y+crop_height, offset_x:offset_x+crop_width] = img[crop_start_y:crop_end_y, crop_start_x:crop_end_x]
-        mask_aug[offset_y:offset_y+crop_height, offset_x:offset_x+crop_width] = mask[crop_start_y:crop_end_y, crop_start_x:crop_end_x]
-
-        # modify meta data
-        offset_left = self.params["crop_size_x"] / 2 - label["objpos"][0] - x_offset
-        offset_up = self.params["crop_size_y"] / 2 - label["objpos"][1] - y_offset
-
-        label["objpos"] = [label["objpos"][0] + offset_left, label["objpos"][1] + offset_up]
-
-        for person in label["persons"]:
-            for joint_idx in range(cfg.ch_heats - 1):
-                person["joint"][joint_idx, 0] = person["joint"][joint_idx, 0] + offset_left
-                person["joint"][joint_idx, 1] = person["joint"][joint_idx, 1] + offset_up
-                if person["joint"][joint_idx, 0] <= 0 or person["joint"][joint_idx, 0] >= self.params["crop_size_x"] - 1 \
-                   or person["joint"][joint_idx, 1] <= 0 or person["joint"][joint_idx, 1] >= self.params["crop_size_y"] - 1:
-                    person["joint"][joint_idx, 2] = 2
-
-        return img_aug, mask_aug, label
-
-
-    def augmentation_flip(self, img, mask, label):
-        dice = np.random.rand()
-        do_flip = dice <= self.params["flip_prob"]
-
-        if do_flip == True:
-            return img, mask, label
-        img_aug = cv2.flip(img, 1)
-        mask_aug = cv2.flip(mask, 1)
-
-        label["objpos"][0] = self.params["crop_size_x"] - 1 - label["objpos"][0]
-
-        right_idxes = [2, 3, 4, 8, 9, 10, 14, 16]
-        left_idxes =  [5, 6, 7, 11, 12, 13, 15, 17]
-
-        _, w, _ = img_aug.shape
-
-        # need to exchange left joints with right joints
-        for person in label["persons"]:
-            for joint_idx in range(cfg.ch_heats - 1):
-                person["joint"][joint_idx, 0] = w - 1 - person["joint"][joint_idx, 0]
-            for idx, joint_idx_1 in enumerate(right_idxes):
-                joint_idx_2 = left_idxes[idx]
-                # exchange the joint_idx_1-th joint with the joint_idx_2-th joint
-                person["joint"][[joint_idx_1, joint_idx_2]] = person["joint"][[joint_idx_2, joint_idx_1]]
-
-        return img_aug, mask_aug, label
-
     def get_data(self):
         if self.shuffle:
             self.rng.shuffle(self.db)
 
         for img_id in range(len(self.db)):
-            img_id = np.random.randint(0,len(self.db))
+            # img_id = np.random.randint(0,len(self.db))
             db_rec = copy.deepcopy(self.db[img_id])
             image_file = db_rec['image']
             filename = db_rec['filename'] if 'filename' in db_rec else ''
@@ -481,42 +322,31 @@ class Data(RNGDataFlow):
                         joints, joints_vis, data_numpy.shape[1], [])
                     c[0] = data_numpy.shape[1] - c[0] - 1
 
-            trans = get_affine_transform(c, s, r, [cfg.image_width, cfg.image_height])
-            input = cv2.warpAffine(data_numpy, trans, (int(cfg.image_width), int(cfg.image_height)), flags=cv2.INTER_LINEAR)
+            trans = get_affine_transform(c, s, r, cfg.image_size)
+            input = cv2.warpAffine(data_numpy, trans, (int(cfg.image_size[0]), int(cfg.image_size[1])), flags=cv2.INTER_LINEAR)
             input1=copy.deepcopy(input)
                
-
-            if cfg.use_normalize == True:
-                input = input / 255
-                mean = [0.485, 0.456, 0.406]    # rgb
-                std = [0.229, 0.224, 0.225]
-                if cfg.is_rgb == True:
-                    input = (input-mean) / std
-                else:
-                    input = (input-mean[::-1]) / std[::-1]
-
+      
             for i in range(self.num_joints):
                 if joints_vis[i, 0] > 0.0:
                     joints[i, 0:2] = affine_transform(joints[i, 0:2], trans)
 
             target, target_weight = self.generate_target(joints, joints_vis)
 
-            # target = torch.from_numpy(target)
-            # target_weight = torch.from_numpy(target_weight)
 
-            meta = {
-            'image': image_file,
-            'filename': filename,
-            'imgnum': imgnum,
-            'joints': joints,
-            'joints_vis': joints_vis,
-            'center': c,
-            'scale': s,
-            'rotation': r,
-            'score': score}
+            # meta = {
+            # 'image': image_file,
+            # 'filename': filename,
+            # 'imgnum': imgnum,
+            # 'joints': joints,
+            # 'joints_vis': joints_vis,
+            # 'center': c,
+            # 'scale': s,
+            # 'rotation': r,
+            # 'score': score}
             # pdb.set_trace()
-            #target (17, 64, 64), target_weight (17, 1),
-            # yield input, target, target_weight, meta
+            #input (256, 192, 3), target (17, 64, 48), target_weight (17, 1),
+          
             yield input, target, target_weight
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@ _.num_deconv_kernels = [4, 4, 4]
 
 _.deconv_with_bias = False
 
-_.final_num_joints = 16
+_.final_num_joints = 17
 
 _.final_conv_kernel = 1
 
@@ -22,7 +22,7 @@ _.use_target_weight = True
 
 _.weight_decay = 5e-4
 
-_.base_lr = 2e-5
+_.base_lr = 1e-5#2e-5
 
 _.depth = 50
 
@@ -30,11 +30,9 @@ _.momentum = 0.9
 
 _.pixel_std = 200
 
-_.image_width = 256
+_.image_size = [192, 256]# width * height
 
-_.image_height = 256
-
-_.heatmap_size = [64, 64] # width * height, ex: 24 * 32
+_.heatmap_size = [48, 64] # width * height, ex: 24 * 32
 
 _.use_gt_bbox = True
 
@@ -42,17 +40,15 @@ _.select_data = False
 
 _.data_format = 'jpg'
 
-_.scale_factor = 0.25
+_.scale_factor = 0.3
 
-_.rot_factor = 30
+_.rot_factor = 40
 
 _.flip = True
 
 _.sigma = 2
 
-_.use_normalize = False
-
-_.is_rgb = True
+_.is_bgr = True
 
 _.target_type = 'gaussian'
 

@@ -7,7 +7,7 @@ from tensorpack.tfutils.summary import *
 from tensorpack.tfutils.symbolic_functions import *
 from tensorpack.utils.gpu import get_nr_gpu
 from tensorpack.tfutils import optimizer, gradproc
-
+import pdb
 import numpy  as np
 
 try:
@@ -33,21 +33,21 @@ except Exception:
 # def apply_mask(t, mask):
 #     return t * mask
 
-# def image_preprocess(image, bgr=True):
-#     with tf.name_scope('image_preprocess'):
-#         if image.dtype.base_dtype != tf.float32:
-#             image = tf.cast(image, tf.float32)
-#         image = image * (1.0 / 255)
+def image_preprocess(image, bgr=True):
+    with tf.name_scope('image_preprocess'):
+        if image.dtype.base_dtype != tf.float32:
+            image = tf.cast(image, tf.float32)
+        image = image * (1.0 / 255)
 
-#         mean = [0.485, 0.456, 0.406]    # rgb
-#         std = [0.229, 0.224, 0.225]
-#         if bgr:
-#             mean = mean[::-1]
-#             std = std[::-1]
-#         image_mean = tf.constant(mean, dtype=tf.float32)
-#         image_std = tf.constant(std, dtype=tf.float32)
-#         image = (image - image_mean) / image_std
-#         return image
+        mean = [0.485, 0.456, 0.406]    # rgb
+        std = [0.229, 0.224, 0.225]
+        if bgr:
+            mean = mean[::-1]
+            std = std[::-1]
+        image_mean = tf.constant(mean, dtype=tf.float32)
+        image_std = tf.constant(std, dtype=tf.float32)
+        image = (image - image_mean) / image_std
+        return image
 
 class Model(ModelDesc):
 
@@ -56,18 +56,19 @@ class Model(ModelDesc):
 
     def _get_inputs(self):
         return [
-            InputDesc(tf.float32, (None, None, None, 3), 'imgs'),
-            InputDesc(tf.float32, (None, 17, 64, 64), 'target'),
-            InputDesc(tf.float32, (None, 17, 1), 'target_weight')
+            InputDesc(tf.float32, (None, 256, 192, 3), 'imgs'),
+            InputDesc(tf.float32, (None, cfg.final_num_joints, 64, 48), 'target'),
+            InputDesc(tf.float32, (None, cfg.final_num_joints, 1), 'target_weight')
             # InputDesc(tf.float32, (None, None, None, 1), 'meta')
         ]
 
     def _build_graph(self, inputs):
-        l, target, target_weight = inputs
-        
-        # imgs = image_preprocess(imgs, bgr=True)
+        imgs, target, target_weight = inputs
+
+        l = image_preprocess(imgs, bgr=True)
 
         # l = tf.cast(imgs, tf.float32) / 255.0 - 1
+
 
         #########################
         # ResNets
@@ -126,10 +127,10 @@ class Model(ModelDesc):
         defs, block_func = net_cfg[cfg.depth]
         
         def get_deconv_cfg(deconv_kernel, index):
-            if deconv_kernel == 4 or deconv_kernel == 2:
-                padding="valid"
+            if deconv_kernel == 4 or deconv_kernel == 3:
+                padding="SAME"
             else:
-                padding="same"
+                padding="VALID"
             return deconv_kernel, padding
 
         def make_deconv_layer(l, layernanme, num_layers, num_filters, num_kernels):
@@ -162,30 +163,41 @@ class Model(ModelDesc):
                           .apply(make_deconv_layer, 'deconv_layers', cfg.num_deconv_layers, cfg.num_deconv_filters, cfg.num_deconv_kernels)
                           .Conv2D('final_layer', cfg.final_num_joints, cfg.final_conv_kernel, padding='SAME' if cfg.final_conv_kernel == 3 else 'VALID')())
         
+        logits = tf.reshape(logits, [-1,64, 48, 17])
+        batch_size  = tf.shape(imgs)[0]
+       
+        logits = tf.transpose(logits, [0,3,1,2])
+    
+        output1 = tf.identity(logits,  name = 'heatmaps')
 
-        batch_size = logits.get_shape()[0]##batch_size  
-        num_joints = logits.get_shape()[3]##channel
+        heatmaps_pred = tf.reshape(logits, [-1, 17, 64*48], name='heatmap_pred')
+        
 
-        heatmaps_pred = tf.reshape(logits, (batch_size, 16, -1), name='heatmap_pred')
-        heatmapt_gt = tf.reshape(target, (batch_size, 17, -1), name='heatmap_gt')
+        target = tf.transpose(target, [0,2,3,1])
+        heatmapt_gt = tf.reshape(target, [-1, 17, 64*48], name='heatmap_gt')
 
-        # heatmaps_pred = tf.split(heatmaps_pred, num_joints, 1)
-        # heatmapt_gt = tf.split(heatmapt_gt, num_joints, 1)
+        heatmaps_pred = tf.split(heatmaps_pred, 17, 1)
+        heatmapt_gt = tf.split(heatmapt_gt, 17, 1)
 
         loss_list = []
         idx = 0
+
         for heatmaps, heatmapt_ in zip(heatmaps_pred, heatmapt_gt):
+            heatmaps = tf.reshape(heatmaps,[-1, 3072])
+            heatmapt_ = tf.reshape(heatmapt_,[-1, 3072])
             if cfg.use_target_weight:
-                # loss = tf.nn.l2_loss((tf.mul(heatmaps, target_weight[:,idx]) - tf.mul(heatmapt_, target_weight[:,idx]))) / tf.cast(batch_size, tf.float32)
-                loss = tf.square(tf.mul(heatmaps, target_weight[:,idx]) - tf.mul(heatmapt_, target_weight[:,idx]))*0.5
+                
+                loss = tf.nn.l2_loss((tf.multiply(heatmaps, target_weight[:,idx]) - tf.multiply(heatmapt_, target_weight[:,idx]))) / tf.cast(batch_size, tf.float32)
+                # loss = tf.square(tf.multiply(heatmaps, target_weight[:,idx]) - tf.multiply(heatmapt_, target_weight[:,idx]))*0.5
                 loss_list.append(loss)
             else:
-                # loss = tf.nn.l2_loss((heatmaps - heatmapt_)) / tf.cast(batch_size, tf.float32)
-                loss = tf.square(heatmaps - heatmapt_)*0.5
+                # pdb.set_trace()
+                loss = tf.nn.l2_loss((heatmaps - heatmapt_)) / tf.cast(batch_size, tf.float32)
+                # loss = tf.square(heatmaps - heatmapt_)*0.5
                 loss_list.append(loss)
             idx+=1
-
-        total_loss = tf.add_n(loss_list)
+        # pdb.set_trace()
+        total_loss = tf.add_n(loss_list, name='total_loss')
 
         if cfg.weight_decay > 0:
             wd_cost = regularize_cost('.*/W', l2_regularizer(cfg.weight_decay), name='l2_regularize_loss')
@@ -197,7 +209,7 @@ class Model(ModelDesc):
 
         # ========================== Summary & Outputs ==========================
         tf.summary.image(name='image', tensor=imgs, max_outputs=3)
-        tf.summary.image(name='mask', tensor=target, max_outputs=3)
+        # tf.summary.image(name='mask', tensor=target, max_outputs=3)
 
         # stage1_output1 = tf.identity(heatmap_outputs[0],  name = 'heatmaps_1')
         # stage1_output2 = tf.identity(paf_outputs[0], name = 'pafs_1')
@@ -210,23 +222,23 @@ class Model(ModelDesc):
         # stage5_output1 = tf.identity(heatmap_outputs[4],  name = 'heatmaps_5')
         # stage5_output2 = tf.identity(paf_outputs[4], name = 'pafs_5')
 
-        output1 = tf.identity(logits,  name = 'heatmaps')
+       
 
-        add_moving_summary(self.cost, name='cost')
-        add_moving_summary(total_loss, name = 'loss')
+        add_moving_summary(self.cost)
+        add_moving_summary(total_loss)
         
 
-        # gt_joint_heatmaps = tf.split(gt_heatmaps, [18, 1], axis=3)[0]
+        # gt_joint_heatmaps = tf.split(target, [17, 1], axis=1)[0]
         # gt_heatmap_shown = tf.reduce_max(gt_joint_heatmaps, axis=3, keep_dims=True)
-        # joint_heatmaps = tf.split(heatmap_outputs[-1], [18, 1], axis=3)[0]
-        # heatmap_shown = tf.reduce_max(joint_heatmaps, axis=3, keep_dims=True)
+        # joint_heatmaps = tf.split(logits[-1], [17, 1], axis=3)[0]
+        # heatmap_shown = tf.reduce_max(logits, axis=1, keep_dims=True)
         # tf.summary.image(name='gt_heatmap', tensor=gt_heatmap_shown, max_outputs=3)
         # tf.summary.image(name='heatmap', tensor=heatmap_shown, max_outputs=3)
 
     def _get_optimizer(self):
         lr = get_scalar_var('learning_rate', cfg.base_lr, summary=True)
-        opt = tf.train.MomentumOptimizer(learning_rate=lr, momentum=cfg.momentum, use_nesterov=True)
-        return opt
+        return tf.train.MomentumOptimizer(learning_rate=lr, momentum=cfg.momentum, use_nesterov=True)
+        # return tf.train.AdamOptimizer(cfg.base_lr, beta1=0.5, beta2=0.9)
 
 def get_data(train_or_test, batch_size):
     is_train = train_or_test == 'train'
@@ -272,18 +284,20 @@ def get_config(args, model):
         callbacks = [
             ModelSaver(),
             # PeriodicTrigger(InferenceRunner(ds_val, [ScalarStats('cost')]),
-            #                 every_k_epochs=3),
+            #                 every_k_epochs=2),
             HumanHyperParamSetter('learning_rate'),
         ],
         model = model,
+        max_epoch = 200,
         steps_per_epoch = sample_num // (args.batch_size_per_gpu * get_nr_gpu()),
+        # steps_per_epoch = 12,
     )
 
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gpu', help='comma separated list of GPU(s) to use.', default='0')
+    parser.add_argument('--gpu', help='comma separated list of GPU(s) to use.', default='1')
     parser.add_argument('--load', help='load model')
     parser.add_argument('--batch_size_per_gpu', type=int, default=16)
     parser.add_argument('--logdir', help="directory of logging", default=None)
