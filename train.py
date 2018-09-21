@@ -163,38 +163,33 @@ class Model(ModelDesc):
                           .apply(make_deconv_layer, 'deconv_layers', cfg.num_deconv_layers, cfg.num_deconv_filters, cfg.num_deconv_kernels)
                           .Conv2D('final_layer', cfg.final_num_joints, cfg.final_conv_kernel, padding='SAME' if cfg.final_conv_kernel == 3 else 'VALID')())
         
-        logits = tf.reshape(logits, [-1,64, 48, 17])
-        batch_size  = tf.shape(imgs)[0]
-       
-        logits = tf.transpose(logits, [0,3,1,2])
-    
+        # pdb.set_trace()
         output1 = tf.identity(logits,  name = 'heatmaps')
 
-        heatmaps_pred = tf.reshape(logits, [-1, 17, 64*48], name='heatmap_pred')
-        
+        logits = tf.transpose(logits, [0,3,1,2])#n c h w
 
-        target = tf.transpose(target, [0,2,3,1])
-        heatmapt_gt = tf.reshape(target, [-1, 17, 64*48], name='heatmap_gt')
+        heatmaps_ = tf.reshape(logits, [-1, 17, 64*48])
+        heatmaps_gt_ = tf.reshape(target, [-1, 17, 64*48])
 
-        heatmaps_pred = tf.split(heatmaps_pred, 17, 1)
-        heatmapt_gt = tf.split(heatmapt_gt, 17, 1)
+        heatmaps_pred = tf.split(heatmaps_, 17, 1)
+        heatmaps_gt = tf.split(heatmaps_gt_, 17, 1)
 
+        batch_size = tf.shape(imgs)[0]
         loss_list = []
         idx = 0
 
-        for heatmaps, heatmapt_ in zip(heatmaps_pred, heatmapt_gt):
-            heatmaps = tf.reshape(heatmaps,[-1, 3072])
-            heatmapt_ = tf.reshape(heatmapt_,[-1, 3072])
+        for i in range(17):
+            heatmap_pred = tf.squeeze(heatmaps_pred[i])#batchsize * 3072
+            heatmap_gt = tf.squeeze(heatmaps_gt[i])#batchsize * 3072
             if cfg.use_target_weight:
                 
-                loss = tf.nn.l2_loss((tf.multiply(heatmaps, target_weight[:,idx]) - tf.multiply(heatmapt_, target_weight[:,idx]))) / tf.cast(batch_size, tf.float32)
+                loss = tf.nn.l2_loss((tf.multiply(heatmap_pred, target_weight[:,idx]) - tf.multiply(heatmap_gt, target_weight[:,idx]))) / tf.cast(batch_size, tf.float32)
                 # loss = tf.square(tf.multiply(heatmaps, target_weight[:,idx]) - tf.multiply(heatmapt_, target_weight[:,idx]))*0.5
-                loss_list.append(loss)
             else:
                 # pdb.set_trace()
-                loss = tf.nn.l2_loss((heatmaps - heatmapt_)) / tf.cast(batch_size, tf.float32)
+                loss = tf.nn.l2_loss(heatmap_pred - heatmap_gt) / tf.cast(batch_size, tf.float32)
                 # loss = tf.square(heatmaps - heatmapt_)*0.5
-                loss_list.append(loss)
+            loss_list.append(loss)
             idx+=1
         # pdb.set_trace()
         total_loss = tf.add_n(loss_list, name='total_loss')
@@ -227,18 +222,27 @@ class Model(ModelDesc):
         add_moving_summary(self.cost)
         add_moving_summary(total_loss)
         
+        for idx, sub_loss in enumerate(loss_list):
+            add_moving_summary(tf.identity(loss_list[idx], name='stage%d_l2_loss' % (idx+1)))
 
-        # gt_joint_heatmaps = tf.split(target, [17, 1], axis=1)[0]
-        # gt_heatmap_shown = tf.reduce_max(gt_joint_heatmaps, axis=3, keep_dims=True)
-        # joint_heatmaps = tf.split(logits[-1], [17, 1], axis=3)[0]
-        # heatmap_shown = tf.reduce_max(logits, axis=1, keep_dims=True)
-        # tf.summary.image(name='gt_heatmap', tensor=gt_heatmap_shown, max_outputs=3)
-        # tf.summary.image(name='heatmap', tensor=heatmap_shown, max_outputs=3)
+        targetss=  tf.transpose(target, [0,2,3,1])
+        logitss = tf.transpose(logits, [0, 2, 3, 1])
+
+        gt_joint_heatmaps = tf.split(targetss, 17, 3)
+        gt_heatmap_shown = tf.reduce_max(gt_joint_heatmaps[-1], axis=3, keep_dims=True)
+        tf.summary.image(name='gt_heatmap', tensor=gt_heatmap_shown, max_outputs=3)
+
+
+        joint_heatmaps = tf.split(logitss, 17, 3)
+        heatmap_shown = tf.reduce_max(joint_heatmaps[-1], axis=3, keep_dims=True)
+        tf.summary.image(name='heatmap', tensor=heatmap_shown, max_outputs=3)
+        
+        
 
     def _get_optimizer(self):
         lr = get_scalar_var('learning_rate', cfg.base_lr, summary=True)
-        return tf.train.MomentumOptimizer(learning_rate=lr, momentum=cfg.momentum, use_nesterov=True)
-        # return tf.train.AdamOptimizer(cfg.base_lr, beta1=0.5, beta2=0.9)
+        # return tf.train.MomentumOptimizer(learning_rate=lr, momentum=cfg.momentum, use_nesterov=True)
+        return tf.train.AdamOptimizer(lr)
 
 def get_data(train_or_test, batch_size):
     is_train = train_or_test == 'train'
@@ -289,8 +293,8 @@ def get_config(args, model):
         ],
         model = model,
         max_epoch = 200,
-        steps_per_epoch = sample_num // (args.batch_size_per_gpu * get_nr_gpu()),
-        # steps_per_epoch = 12,
+        # steps_per_epoch = sample_num // (args.batch_size_per_gpu * get_nr_gpu()),
+        steps_per_epoch = 2000,
     )
 
 
