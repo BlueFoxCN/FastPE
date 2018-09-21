@@ -22,7 +22,7 @@ _.use_target_weight = True
 
 _.weight_decay = 5e-4
 
-_.base_lr = 1e-5#2e-5
+_.base_lr = 1e-3
 
 _.depth = 50
 

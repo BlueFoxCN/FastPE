@@ -228,13 +228,13 @@ class Model(ModelDesc):
         targetss=  tf.transpose(target, [0,2,3,1])
         logitss = tf.transpose(logits, [0, 2, 3, 1])
 
-        gt_joint_heatmaps = tf.split(targetss, 17, 3)
-        gt_heatmap_shown = tf.reduce_max(gt_joint_heatmaps[-1], axis=3, keep_dims=True)
+        
+        gt_heatmap_shown = tf.reduce_max(targetss, axis=3, keep_dims=True)
         tf.summary.image(name='gt_heatmap', tensor=gt_heatmap_shown, max_outputs=3)
 
 
-        joint_heatmaps = tf.split(logitss, 17, 3)
-        heatmap_shown = tf.reduce_max(joint_heatmaps[-1], axis=3, keep_dims=True)
+       
+        heatmap_shown = tf.reduce_max(logitss, axis=3, keep_dims=True)
         tf.summary.image(name='heatmap', tensor=heatmap_shown, max_outputs=3)
         
         
@@ -293,8 +293,8 @@ def get_config(args, model):
         ],
         model = model,
         max_epoch = 200,
-        # steps_per_epoch = sample_num // (args.batch_size_per_gpu * get_nr_gpu()),
-        steps_per_epoch = 2000,
+        steps_per_epoch = sample_num // (args.batch_size_per_gpu * get_nr_gpu()),
+        # steps_per_epoch = 20,
     )
 
 
